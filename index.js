@@ -1,4 +1,5 @@
 const { DATABASE_SCHEMA, DATABASE_URL, SHOW_PG_MONITOR } = require('./config');
+const axios = require('axios');
 const massive = require('massive');
 const monitor = require('pg-monitor');
 
@@ -65,18 +66,44 @@ const monitor = require('pg-monitor');
     try {
         await migrationUp();
 
-        //exemplo de insert
-        const result1 = await db[DATABASE_SCHEMA].api_data.insert({
-            doc_record: { 'a': 'b' },
+        // Busca os dados fazendo uma requisição GET utilizando o Axios
+        const { data: { data, source }} = await axios.get('https://datausa.io/api/data?drilldowns=Nation&measures=Population');
+
+        // Filtra os dados de acordo com os anos solicitados
+        const filteredData = data.filter((item) => item.Year >= 2018 && item.Year <= 2020);
+        // Realiza o cálculo da soma do campo Population em memória
+        const resultUsingArrayFunctions = filteredData.reduce((accumulator, currentValue) => {
+            return accumulator = accumulator + currentValue.Population;
+        }, 0);
+
+        // Limpa a tabela api_data
+        await db[DATABASE_SCHEMA].api_data.destroy({});
+
+        // Insere os dados retornados pela requisição no banco de dados
+        await db[DATABASE_SCHEMA].api_data.insert({
+            api_name: source[0].name,
+            doc_id: source[0].annotations.table_id,
+            doc_name: source[0].annotations.dataset_name,
+            doc_record: JSON.stringify(data),
         })
-        console.log('result1 >>>', result1);
 
-        //exemplo select
-        const result2 = await db[DATABASE_SCHEMA].api_data.find({
-            is_active: true
-        });
-        console.log('result2 >>>', result2);
+        // Retorna a soma da população dos anos solicitados
+        const [resultUsingSelect] = await db.query(`
+            WITH records AS (
+                SELECT jsonb_array_elements(doc_record) AS record
+                FROM ${DATABASE_SCHEMA}.api_data
+            )
+            SELECT SUM((record->>'Population')::integer) AS total_population
+            FROM records
+            WHERE record->>'Year' IN ('2018', '2019', '2020');
+        `);
+        
+        // Retorna a soma da população dos anos solicitados a partir da view
+        const [resultUsingView] = await db[DATABASE_SCHEMA].vw_population.find();
 
+        console.log('Resultado do cálculo em memória >>>', resultUsingArrayFunctions);
+        console.log('Resultado do cálculo utilizando select >>>', resultUsingSelect.total_population);
+        console.log('Resultado do cálculo utilizando a view >>>', resultUsingView.total_population);
     } catch (e) {
         console.log(e.message)
     } finally {
